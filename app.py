@@ -117,54 +117,146 @@ def musicxml_to_abc(musicxml_path: str) -> str:
         # Get key signature
         ks = score.recurse().getElementsByClass('KeySignature')
         if ks:
-            abc_lines[4] = f"K:{ks[0].asKey().tonicPitchNameWithCase}"
+            key_obj = ks[0].asKey()
+            # Format key properly for ABC
+            tonic = key_obj.tonic.name
+            mode = key_obj.mode
+            if mode == 'minor':
+                abc_lines[4] = f"K:{tonic}m"
+            else:
+                abc_lines[4] = f"K:{tonic}"
 
         abc_lines.append("")
+        abc_lines.append("% Standard ABC notation (with octaves):")
+        abc_lines.append("")
 
-        # Simple note conversion (basic implementation)
-        # Note: Full ABC conversion is complex; this is a simplified version
-        abc_lines.append("% Note: This is a simplified ABC representation")
-        abc_lines.append("% For full accuracy, use the MusicXML output")
+        # Chordify the score - this properly groups simultaneous notes into chords
+        # and handles cases where notes have different durations
+        try:
+            chordified = score.chordify()
+        except:
+            # Fallback if chordify fails
+            abc_lines.append("% Could not properly analyze chords")
+            abc_lines.append("% Please use MusicXML output for accurate representation")
+            return "\n".join(abc_lines)
 
-        notes_line = ""
-        for element in score.flatten().notesAndRests:
-            if element.isNote:
-                pitch = element.pitch.name.replace('-', 'b').replace('#', '^')
-                octave = element.pitch.octave
+        # Get time signature for measure boundaries
+        time_sig = chordified.recurse().getElementsByClass('TimeSignature')
+        measure_length = time_sig[0].barDuration.quarterLength if time_sig else 4.0
 
-                # ABC octave notation
-                if octave >= 5:
-                    pitch = pitch.lower()
-                    pitch += "'" * (octave - 5)
-                else:
-                    pitch = pitch.upper()
-                    if octave < 4:
-                        pitch += "," * (4 - octave)
+        current_measure_length = 0
 
-                # Duration (simplified)
-                if element.quarterLength == 2:
-                    pitch += "2"
-                elif element.quarterLength == 0.5:
-                    pitch += "/2"
-                elif element.quarterLength == 1.5:
-                    pitch += "3/2"
+        # Process the chordified score
+        for measure in chordified.getElementsByClass('Measure'):
+            measure_items = []
 
-                notes_line += pitch + " "
-            elif element.isRest:
-                notes_line += "z "
+            for element in measure.flatten().notesAndRests:
+                if element.isChord:
+                    # Get all pitches in the chord
+                    pitches = list(element.pitches)
+                    # Sort from lowest to highest
+                    pitches.sort(key=lambda p: p.ps)
 
-            # Line breaks for readability
-            if len(notes_line) > 60:
-                abc_lines.append(notes_line)
-                notes_line = ""
+                    # Convert to ABC
+                    chord_notes = [pitch_to_abc(p) for p in pitches]
+                    duration_str = duration_to_abc(element.quarterLength)
 
-        if notes_line:
-            abc_lines.append(notes_line)
+                    if len(pitches) > 1:
+                        measure_items.append("[" + "".join(chord_notes) + "]" + duration_str)
+                    else:
+                        # Single note (shouldn't happen in chordified, but handle it)
+                        measure_items.append(chord_notes[0] + duration_str)
+
+                elif element.isNote:
+                    # Single note
+                    abc_note = pitch_to_abc(element.pitch)
+                    duration_str = duration_to_abc(element.quarterLength)
+                    measure_items.append(abc_note + duration_str)
+
+                elif element.isRest:
+                    # Rest
+                    duration_str = duration_to_abc(element.quarterLength)
+                    measure_items.append("z" + duration_str)
+
+            # Add measure with bar line
+            if measure_items:
+                abc_lines.append(" ".join(measure_items) + " |")
+
+        # Add simplified chord list (just letter names, no octaves)
+        abc_lines.append("")
+        abc_lines.append("% Simplified chord list (letter names only):")
+        chords_simple = []
+        for measure in chordified.getElementsByClass('Measure'):
+            for element in measure.flatten().notesAndRests:
+                if element.isChord:
+                    pitches = list(element.pitches)
+                    pitches.sort(key=lambda p: p.ps)
+                    # Just the step letters
+                    chord_letters = ''.join([p.step for p in pitches])
+                    chords_simple.append(chord_letters)
+
+        if chords_simple:
+            abc_lines.append(" | ".join(chords_simple))
 
         return "\n".join(abc_lines)
 
     except Exception as e:
         return f"Error converting to ABC: {str(e)}\n\n(ABC conversion is experimental - use MusicXML for best results)"
+
+
+def pitch_to_abc(pitch, simple_letters=True) -> str:
+    """Convert music21 pitch to ABC notation."""
+    if simple_letters:
+        # Use just the letter name (step) without accidentals
+        # This matches typical chord notation like "BDFB"
+        note_name = pitch.step
+    else:
+        # Full ABC notation with accidentals
+        note_name = pitch.name.replace('-', '_').replace('#', '^')
+
+    octave = pitch.octave
+
+    # ABC octave notation:
+    # C4 (middle C) = C
+    # C5 = c, C6 = c', C7 = c''
+    # C3 = C,, C2 = C,,,
+    if octave >= 5:
+        abc_note = note_name.lower()
+        abc_note += "'" * (octave - 5)
+    elif octave == 4:
+        abc_note = note_name.upper()
+    else:
+        abc_note = note_name.upper()
+        abc_note += "," * (4 - octave)
+
+    return abc_note
+
+
+def duration_to_abc(quarter_length: float) -> str:
+    """Convert music21 quarter length to ABC duration."""
+    # ABC durations: no suffix = 1 quarter, 2 = half, /2 = eighth, etc.
+    if quarter_length == 4:
+        return "4"  # whole note
+    elif quarter_length == 3:
+        return "3"  # dotted half
+    elif quarter_length == 2:
+        return "2"  # half note
+    elif quarter_length == 1.5:
+        return "3/2"  # dotted quarter
+    elif quarter_length == 1:
+        return ""  # quarter note (default)
+    elif quarter_length == 0.75:
+        return "3/4"  # dotted eighth
+    elif quarter_length == 0.5:
+        return "/2"  # eighth note
+    elif quarter_length == 0.25:
+        return "/4"  # sixteenth note
+    else:
+        # For other durations, try to represent as fraction
+        if quarter_length > 1:
+            return str(int(quarter_length)) if quarter_length == int(quarter_length) else f"{quarter_length}"
+        else:
+            return f"/{int(1/quarter_length)}" if (1/quarter_length) == int(1/quarter_length) else f"/{quarter_length}"
 
 
 def musicxml_to_midi(musicxml_path: str, output_path: str) -> str:
@@ -305,7 +397,7 @@ def create_ui():
                             label="ABC Notation (Copy-Paste Ready)",
                             lines=15,
                             interactive=False,
-                            show_copy=True
+                            buttons=["copy"]
                         )
 
                     with gr.Tab("MIDI"):
