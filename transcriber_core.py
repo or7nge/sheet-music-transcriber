@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Optional
 import os
 import shutil
 import subprocess
 
+import cv2
 from music21 import converter
+import numpy as np
 from pdf2image import convert_from_path
 
 
@@ -23,6 +26,7 @@ DEFAULT_HOMR_DIR = Path("/Users/andrew/Documents/git/homr")
 @dataclass(slots=True)
 class ProcessingResult:
     abc_text: str
+    concise_notes_text: str
     musicxml_path: Path
     midi_path: Optional[Path]
     preview_path: Optional[Path]
@@ -83,35 +87,42 @@ def convert_pdf_to_images(pdf_path: str | Path, output_dir: str | Path) -> list[
 
 def process_with_homr(image_path: str | Path, output_dir: str | Path) -> Path:
     """Run homr on an image and return generated MusicXML path."""
-    image_path = Path(image_path)
-    output_dir = Path(output_dir)
+    image_path = Path(image_path).expanduser().resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     homr_dir = resolve_homr_dir()
     if not homr_dir.exists():
         raise RuntimeError(f"homr directory not found: {homr_dir}")
 
-    try:
-        result = subprocess.run(
-            ["poetry", "run", "homr", str(image_path)],
-            capture_output=True,
-            text=True,
-            cwd=homr_dir,
-            timeout=180,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("homr timed out while processing the score") from exc
-    except FileNotFoundError as exc:
-        raise RuntimeError("poetry was not found in PATH") from exc
+    processed_image = image_path
+    result = _run_homr(homr_dir=homr_dir, image_path=processed_image)
+    details = _extract_homr_details(result)
+
+    # homr can fail early on low-contrast or low-resolution uploads.
+    # Retry once with a staff-friendly enhanced render before surfacing an error.
+    if result.returncode != 0 and _is_staff_detection_failure(details):
+        retry_image = _prepare_retry_image_for_homr(image_path=image_path, output_dir=output_dir)
+        processed_image = retry_image
+        retry_result = _run_homr(homr_dir=homr_dir, image_path=processed_image)
+        retry_details = _extract_homr_details(retry_result)
+        if retry_result.returncode != 0:
+            summary = _summarize_homr_error(retry_details)
+            raise RuntimeError(
+                "homr could not detect enough notation structure after one enhancement retry. "
+                "Try a straighter, higher-resolution crop where staff lines and noteheads are clear. "
+                f"Details: {summary}"
+            )
+
+        result = retry_result
+        details = retry_details
 
     if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        stdout = (result.stdout or "").strip()
-        details = stderr or stdout or "Unknown homr error"
-        raise RuntimeError(f"homr processing failed: {details}")
+        summary = _summarize_homr_error(details)
+        raise RuntimeError(f"homr processing failed: {summary}")
 
     # homr writes output next to the source image.
-    generated_musicxml = image_path.with_suffix(".musicxml")
+    generated_musicxml = processed_image.with_suffix(".musicxml")
     if not generated_musicxml.exists():
         raise RuntimeError("homr finished but no MusicXML file was generated")
 
@@ -123,6 +134,83 @@ def process_with_homr(image_path: str | Path, output_dir: str | Path) -> Path:
         destination = generated_musicxml
 
     return destination
+
+
+def _run_homr(homr_dir: Path, image_path: Path) -> subprocess.CompletedProcess[str]:
+    """Execute homr for one image and return the subprocess result."""
+    try:
+        return subprocess.run(
+            ["poetry", "run", "homr", str(image_path)],
+            capture_output=True,
+            text=True,
+            cwd=homr_dir,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("homr timed out while processing the score") from exc
+    except FileNotFoundError as exc:
+        raise RuntimeError("poetry was not found in PATH") from exc
+
+
+def _extract_homr_details(result: subprocess.CompletedProcess[str]) -> str:
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    return stderr or stdout or "Unknown homr error"
+
+
+def _summarize_homr_error(details: str) -> str:
+    lines = [line.strip() for line in details.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.lower().startswith("exception:"):
+            return line
+    if lines:
+        return lines[-1]
+    return "Unknown homr error"
+
+
+def _is_staff_detection_failure(details: str) -> bool:
+    lower = details.lower()
+    markers = (
+        "no staffs found",
+        "no noteheads found",
+        "found 0 staffs",
+        "found 0 staff anchors",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _prepare_retry_image_for_homr(image_path: Path, output_dir: Path) -> Path:
+    """Build a contrast-enhanced binary image that improves staff detection."""
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise RuntimeError("Uploaded image could not be read for retry preprocessing")
+
+    height, width = image.shape[:2]
+    max_dim = max(height, width)
+    if max_dim < 2200:
+        scale = min(3.0, 2200.0 / float(max_dim))
+        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+    clahe = cv2.createCLAHE(clipLimit=2.8, tileGridSize=(8, 8))
+    enhanced = clahe.apply(image)
+    enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    binary = cv2.adaptiveThreshold(
+        enhanced,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        41,
+        11,
+    )
+
+    if float(np.mean(binary)) < 127:
+        binary = cv2.bitwise_not(binary)
+
+    retry_path = output_dir / f"{image_path.stem}_staff_retry.png"
+    if not cv2.imwrite(str(retry_path), binary):
+        raise RuntimeError("Failed to write enhanced retry image")
+    return retry_path
 
 
 def musicxml_to_abc(musicxml_path: str | Path) -> str:
@@ -190,16 +278,20 @@ def musicxml_to_abc(musicxml_path: str | Path) -> str:
                 abc_lines.append(" ".join(measure_items) + " |")
 
         abc_lines.append("")
-        abc_lines.append("% Simplified chord list (letter names only):")
-        simplified_chords: list[str] = []
+        abc_lines.append("% Simplified chord/note list (pitch + octave):")
+        simplified_events: list[str] = []
         for measure in chordified.getElementsByClass("Measure"):
             for element in measure.flatten().notesAndRests:
                 if element.isChord:
                     pitches = sorted(list(element.pitches), key=lambda pitch: pitch.ps)
-                    simplified_chords.append("".join([pitch.step for pitch in pitches]))
+                    pitch_labels = [pitch_to_note_label(pitch) for pitch in pitches]
+                    if pitch_labels:
+                        simplified_events.append("/".join(pitch_labels))
+                elif element.isNote:
+                    simplified_events.append(pitch_to_note_label(element.pitch))
 
-        if simplified_chords:
-            abc_lines.append(" | ".join(simplified_chords))
+        if simplified_events:
+            abc_lines.append(" | ".join(simplified_events))
 
         return "\n".join(abc_lines)
 
@@ -224,6 +316,14 @@ def pitch_to_abc(pitch, simple_letters: bool = True) -> str:
         abc_note = note_name.upper() + ("," * (4 - octave))
 
     return abc_note
+
+
+def pitch_to_note_label(pitch) -> str:
+    """Convert music21 pitch to readable note name with octave (e.g., G3, Bb4)."""
+    base_name = pitch.name.replace("-", "b")
+    if pitch.octave is None:
+        return base_name
+    return f"{base_name}{int(pitch.octave)}"
 
 
 def duration_to_abc(quarter_length: float) -> str:
@@ -252,6 +352,80 @@ def duration_to_abc(quarter_length: float) -> str:
     return str(quarter_length)
 
 
+def quarter_length_to_fraction(quarter_length: float) -> str:
+    """Represent quarterLength as a whole-note fraction string (e.g., 1/4, 3/8)."""
+    if quarter_length <= 0:
+        return "0"
+    whole_note_fraction = Fraction(quarter_length).limit_denominator(192) / 4
+    if whole_note_fraction.denominator == 1:
+        return str(whole_note_fraction.numerator)
+    return f"{whole_note_fraction.numerator}/{whole_note_fraction.denominator}"
+
+
+def element_to_concise_token(element) -> str | None:
+    """Convert one music21 note/chord/rest element to a concise token."""
+    duration = quarter_length_to_fraction(float(element.quarterLength))
+
+    if element.isChord:
+        pitches = sorted(list(element.pitches), key=lambda pitch: pitch.ps)
+        pitch_labels = [pitch_to_note_label(pitch) for pitch in pitches]
+        if not pitch_labels:
+            return None
+        if len(pitch_labels) == 1:
+            return f"{pitch_labels[0]}:{duration}"
+        return f"[{','.join(pitch_labels)}]:{duration}"
+
+    if element.isNote:
+        return f"{pitch_to_note_label(element.pitch)}:{duration}"
+
+    if element.isRest:
+        return f"R:{duration}"
+
+    return None
+
+
+def musicxml_to_concise_notes(musicxml_path: str | Path) -> str:
+    """
+    Build an ordered concise note stream from MusicXML.
+    Format: NOTE_OR_CHORD:DURATION, with measures separated by '|'.
+    Examples: C4:1/4, [C4,E4,G4]:1/2, R:1/8
+    """
+    musicxml_path = Path(musicxml_path)
+
+    try:
+        score = converter.parse(str(musicxml_path))
+        try:
+            ordered_score = score.chordify()
+        except Exception:
+            ordered_score = score
+
+        measure_chunks: list[str] = []
+        for measure in ordered_score.getElementsByClass("Measure"):
+            tokens: list[str] = []
+            for element in measure.flatten().notesAndRests:
+                token = element_to_concise_token(element)
+                if token:
+                    tokens.append(token)
+            if tokens:
+                measure_chunks.append(" ".join(tokens))
+
+        if measure_chunks:
+            return " | ".join(measure_chunks)
+
+        # Fallback when score has no measure wrappers.
+        tokens: list[str] = []
+        for element in ordered_score.flatten().notesAndRests:
+            token = element_to_concise_token(element)
+            if token:
+                tokens.append(token)
+        if tokens:
+            return " ".join(tokens)
+
+        return "No note events detected."
+    except Exception as exc:
+        return f"Error building concise note output: {exc}"
+
+
 def musicxml_to_midi(musicxml_path: str | Path, output_path: str | Path) -> Path:
     """Convert MusicXML to MIDI."""
     score = converter.parse(str(musicxml_path))
@@ -273,7 +447,8 @@ def process_sheet_music_file(
     log: list[str] = []
 
     def emit(stage: str, progress: float, message: str) -> None:
-        log.append(message)
+        if not log or log[-1] != message:
+            log.append(message)
         if progress_callback:
             progress_callback(stage, progress, message)
 
@@ -284,27 +459,36 @@ def process_sheet_music_file(
             "Please upload JPG, PNG, or PDF."
         )
 
-    emit("preparing", 0.12, "Preparing input file")
+    emit("preparing", 0.1, "Preparing input file")
+    emit("preparing", 0.16, "Preparing input file")
 
     if suffix == ".pdf":
-        emit("preparing", 0.2, "Converting PDF pages")
+        emit("preparing", 0.22, "Converting PDF pages")
         pages = convert_pdf_to_images(input_path, output_dir)
         if not pages:
             raise RuntimeError("No pages were found in the uploaded PDF")
         process_image = pages[0]
         preview_path = process_image
         log.append(f"Detected {len(pages)} PDF page(s); processing page 1")
+        emit("preparing", 0.3, "Preparing input file")
     else:
         process_image = input_path
         preview_path = input_path
+        emit("preparing", 0.24, "Preparing input file")
 
-    emit("recognizing", 0.5, "Running optical music recognition")
+    emit("recognizing", 0.34, "Running optical music recognition")
+    emit("recognizing", 0.46, "Running optical music recognition")
     musicxml_path = process_with_homr(process_image, output_dir)
+    emit("recognizing", 0.62, "Running optical music recognition")
 
-    emit("converting_abc", 0.72, "Converting MusicXML to ABC")
+    emit("converting_abc", 0.68, "Converting MusicXML to ABC")
     abc_text = musicxml_to_abc(musicxml_path)
+    emit("converting_abc", 0.78, "Converting MusicXML to ABC")
+    emit("converting_notes", 0.8, "Generating concise note sequence")
+    concise_notes_text = musicxml_to_concise_notes(musicxml_path)
+    emit("converting_notes", 0.82, "Generating concise note sequence")
 
-    emit("converting_midi", 0.86, "Converting MusicXML to MIDI")
+    emit("converting_midi", 0.83, "Converting MusicXML to MIDI")
     midi_path: Optional[Path] = output_dir / "score.mid"
     try:
         musicxml_to_midi(musicxml_path, midi_path)
@@ -312,10 +496,12 @@ def process_sheet_music_file(
         log.append(f"MIDI conversion warning: {exc}")
         midi_path = None
 
-    emit("packaging", 0.95, "Packaging output files")
+    emit("converting_midi", 0.9, "Converting MusicXML to MIDI")
+    emit("packaging", 0.94, "Packaging output files")
 
     return ProcessingResult(
         abc_text=abc_text,
+        concise_notes_text=concise_notes_text,
         musicxml_path=musicxml_path,
         midi_path=midi_path,
         preview_path=preview_path,

@@ -3,60 +3,71 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sheet Music Transcriber Studio</title>
+    <title>Sheet Music Transcriber</title>
     <meta
       name="description"
-      content="Upload sheet music and transcribe it into ABC, MIDI, and MusicXML with a refined browser-based workflow."
+      content="Upload sheet music and transcribe it into ABC, MIDI, and MusicXML with a refined browser workflow."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=noise-20260209-ornament-blob-1" />
   </head>
   <body>
     <canvas id="constellation" aria-hidden="true"></canvas>
     <div class="atmosphere" aria-hidden="true"></div>
+    <div class="launch-veil" aria-hidden="true"></div>
 
     <main class="shell">
       <header class="hero reveal" style="--delay: 0.02s">
         <p class="eyebrow">Optical Music Recognition</p>
-        <h1>Sheet Music Transcriber Studio</h1>
+        <h1>Sheet Music Transcriber</h1>
         <p class="lede">
-          A focused browser workspace for converting printed scores into clean
-          digital notation artifacts.
+          Upload one score, run transcription, and get clean output artifacts.
         </p>
-        <div class="hero-badges">
-          <span>JPG / PNG / PDF Input</span>
-          <span>ABC Notation Output</span>
-          <span>MIDI + MusicXML Export</span>
+        <div class="hero-ornament" aria-hidden="true">
+          <div class="hero-ornament-glow"></div>
+          <div class="hero-ornament-staff"></div>
+          <div class="hero-ornament-note">
+            <span class="hero-ornament-notehead"></span>
+            <span class="hero-ornament-stem"></span>
+            <span class="hero-ornament-flag"></span>
+          </div>
         </div>
       </header>
 
-      <section class="workspace">
-        <article class="panel input-panel reveal" style="--delay: 0.1s">
-          <div class="panel-title-row">
+      <section id="workspace" class="workspace">
+        <article class="panel panel-input glass-reactive reveal" style="--delay: 0.1s">
+          <div class="panel-head">
             <h2>Input</h2>
             <p id="fileMetaHint">Choose one score to transcribe</p>
           </div>
 
-          <label for="fileInput" id="dropzone" class="dropzone">
+          <label for="fileInput" id="dropzone" class="dropzone magnetic-zone">
             <input id="fileInput" type="file" accept=".jpg,.jpeg,.png,.pdf" hidden />
-            <div class="dropzone-icon" aria-hidden="true">♪</div>
+            <div class="dropzone-ambient" aria-hidden="true">
+              <span class="dropzone-ambient-blob"></span>
+            </div>
+            <div class="dropzone-icon" aria-hidden="true">
+              <span class="dropzone-icon-note">♪</span>
+            </div>
             <p class="dropzone-title">Drop file or click to upload</p>
-            <p class="dropzone-copy">Use high-resolution scans for best output.</p>
           </label>
+
+          <div class="input-quick-actions">
+            <button id="pasteImageButton" class="secondary tiny magnetic paste-image-button" type="button">
+              Paste image
+            </button>
+            <span class="input-quick-copy">or press Cmd/Ctrl+V</span>
+          </div>
 
           <div id="fileChip" class="file-chip" hidden>
             <div class="file-chip-name" id="fileName"></div>
             <div class="file-chip-meta" id="fileMeta"></div>
           </div>
-
-          <button id="runButton" class="run-button" disabled>
-            Transcribe Score
-          </button>
 
           <div class="progress-wrap">
             <div class="progress-track">
@@ -65,65 +76,31 @@
             <p id="progressText" class="progress-text">Waiting for a file.</p>
           </div>
 
-          <ol id="pipeline" class="pipeline" aria-label="Transcription stages">
-            <li data-stage="queued">Queued</li>
-            <li data-stage="validating">Validate Runtime</li>
-            <li data-stage="preparing">Prepare Input</li>
-            <li data-stage="recognizing">Recognize Notation</li>
-            <li data-stage="converting_abc">Generate ABC</li>
-            <li data-stage="converting_midi">Generate MIDI</li>
-            <li data-stage="packaging">Package Outputs</li>
-            <li data-stage="complete">Complete</li>
-          </ol>
+          <div id="startupHintZone" class="startup-hint-zone" aria-hidden="true">
+            <div id="startupHint" class="startup-hint">
+              <span class="startup-hint-icon" aria-hidden="true">♪</span>
+              <p class="startup-hint-copy">High-resolution scans produce better results.</p>
+            </div>
+          </div>
         </article>
 
-        <article class="panel output-panel reveal" style="--delay: 0.18s">
-          <div class="panel-title-row">
-            <h2>Output</h2>
-            <p id="statusBadge" class="status-badge idle">Idle</p>
+        <article id="historyPanel" class="panel panel-output panel-history glass-reactive">
+          <div class="panel-head">
+            <h2>Transcriptions</h2>
+            <p>Newest first</p>
           </div>
 
-          <div id="previewWrap" class="preview-wrap" hidden>
-            <img id="previewImage" alt="Uploaded score preview" />
-          </div>
-
-          <div class="tabs" role="tablist" aria-label="Output tabs">
-            <button class="tab is-active" data-tab="abc" role="tab" aria-selected="true">ABC</button>
-            <button class="tab" data-tab="midi" role="tab" aria-selected="false">MIDI</button>
-            <button class="tab" data-tab="musicxml" role="tab" aria-selected="false">MusicXML</button>
-            <button class="tab" data-tab="log" role="tab" aria-selected="false">Log</button>
-          </div>
-
-          <section class="tab-panel is-active" id="tab-abc" role="tabpanel">
-            <div class="tab-toolbar">
-              <button id="copyAbcButton" class="secondary">Copy ABC</button>
-            </div>
-            <pre id="abcOutput" class="code-view">ABC output will appear here.</pre>
-          </section>
-
-          <section class="tab-panel" id="tab-midi" role="tabpanel" hidden>
-            <p class="tab-copy">Download a playable MIDI file for your DAW or notation app.</p>
-            <a id="midiDownload" class="download-link disabled" href="#" aria-disabled="true">Download MIDI</a>
-          </section>
-
-          <section class="tab-panel" id="tab-musicxml" role="tabpanel" hidden>
-            <p class="tab-copy">Use MusicXML for the most editable and notation-accurate result.</p>
-            <a id="musicxmlDownload" class="download-link disabled" href="#" aria-disabled="true">Download MusicXML</a>
-          </section>
-
-          <section class="tab-panel" id="tab-log" role="tabpanel" hidden>
-            <pre id="logOutput" class="log-view">Execution log will appear here.</pre>
-          </section>
+          <div id="historyList" class="history-list" aria-live="polite"></div>
         </article>
       </section>
 
       <footer class="footer reveal" style="--delay: 0.24s">
-        Powered by homr + music21. Browser workflow and API rebuilt for speed and clarity.
+        Powered by homr + music21. Minimal workflow with reactive motion and progressive details.
       </footer>
     </main>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=no-wheel-20260209-5" defer></script>
   </body>
 </html>
