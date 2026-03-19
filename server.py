@@ -49,6 +49,8 @@ on run argv
         activate
         if (count of windows) = 0 then
             make new window
+            set URL of active tab of front window to reloadURL
+            return
         end if
 
         set matched to false
@@ -73,8 +75,16 @@ on run argv
 
         if matched is false then
             tell window 1
-                set newTab to (make new tab with properties {URL:reloadURL})
-                set active tab index to (index of newTab)
+                set currentURL to ""
+                try
+                    set currentURL to (URL of active tab) as text
+                end try
+                if currentURL is "" or currentURL is "about:blank" or currentURL is "chrome://newtab/" or currentURL is "chrome://newtab" then
+                    set URL of active tab to reloadURL
+                else
+                    set newTab to (make new tab with properties {URL:reloadURL})
+                    set active tab index to (index of newTab)
+                end if
             end tell
         end if
     end tell
@@ -131,7 +141,6 @@ class JobState:
     progress: float = 0.0
     message: str = "Waiting to start"
     error: Optional[str] = None
-    abc_text: str = ""
     concise_notes_text: str = ""
     files: dict[str, str] = field(default_factory=dict)
     log: list[str] = field(default_factory=list)
@@ -293,7 +302,6 @@ def job_to_dict(job: JobState) -> dict:
         "progress": round(job.progress, 4),
         "message": job.message,
         "error": job.error,
-        "abc_text": job.abc_text,
         "concise_notes_text": job.concise_notes_text,
         "downloads": downloads,
         "preview_url": preview_url,
@@ -335,7 +343,7 @@ def run_job(job_id: str, input_path: Path, job_dir: Path) -> None:
         )
         append_log(job_id, "Checking homr availability")
 
-        if not check_homr_installation():
+        if not check_homr_installation(force_refresh=True):
             raise RuntimeError(
                 "homr is not installed or not accessible. Set HOMR_DIR to your homr folder "
                 "or install homr with: poetry install --only main && poetry run homr --init"
@@ -363,57 +371,24 @@ def run_job(job_id: str, input_path: Path, job_dir: Path) -> None:
         )
 
         files: dict[str, str] = {}
-        set_job(
-            job_id,
-            stage="packaging",
-            progress=0.955,
-            message="Packaging output files",
-        )
+        set_job(job_id, stage="packaging", progress=0.97, message="Packaging output files")
 
-        packaging_targets = 1
-        if result.midi_path and result.midi_path.exists():
-            packaging_targets += 1
-        if result.preview_path and result.preview_path.exists():
-            packaging_targets += 1
-        packaging_step = 0.035 / max(packaging_targets, 1)
-        packaging_progress = 0.955
-
-        def advance_packaging_progress() -> None:
-            nonlocal packaging_progress
-            packaging_progress = min(0.99, packaging_progress + packaging_step)
-            set_job(
-                job_id,
-                stage="packaging",
-                progress=packaging_progress,
-                message="Packaging output files",
-            )
-
-        musicxml_target = job_dir / "output.musicxml"
-        if result.musicxml_path.resolve() != musicxml_target.resolve():
-            shutil.copy2(result.musicxml_path, musicxml_target)
-        else:
-            musicxml_target = result.musicxml_path
+        musicxml_target = result.musicxml_path
+        if not musicxml_target.exists():
+            raise RuntimeError("MusicXML output is missing")
         files["musicxml"] = musicxml_target.name
-        advance_packaging_progress()
 
         if result.midi_path and result.midi_path.exists():
-            midi_target = job_dir / "output.mid"
-            if result.midi_path.resolve() != midi_target.resolve():
-                shutil.copy2(result.midi_path, midi_target)
-            else:
-                midi_target = result.midi_path
-            files["midi"] = midi_target.name
-            advance_packaging_progress()
+            files["midi"] = result.midi_path.name
 
         if result.preview_path and result.preview_path.exists():
-            preview_ext = result.preview_path.suffix.lower() or ".jpg"
-            preview_target = job_dir / f"preview{preview_ext}"
-            if result.preview_path.resolve() != preview_target.resolve():
-                shutil.copy2(result.preview_path, preview_target)
-            else:
-                preview_target = result.preview_path
-            files["preview"] = preview_target.name
-            advance_packaging_progress()
+            preview_path = result.preview_path
+            if preview_path.parent.resolve() != job_dir.resolve():
+                preview_ext = preview_path.suffix.lower() or ".jpg"
+                preview_target = job_dir / f"preview{preview_ext}"
+                shutil.copy2(preview_path, preview_target)
+                preview_path = preview_target
+            files["preview"] = preview_path.name
 
         for line in result.log:
             if line in seen_progress_messages:
@@ -426,7 +401,6 @@ def run_job(job_id: str, input_path: Path, job_dir: Path) -> None:
             stage="complete",
             progress=1.0,
             message="Transcription complete",
-            abc_text=result.abc_text,
             concise_notes_text=result.concise_notes_text,
             files=files,
         )

@@ -9,6 +9,12 @@ echo "Set BROWSER_TARGET=chrome|safari|default (default: chrome)"
 echo "Press Ctrl+C to stop the server"
 echo ""
 
+if [ -x "./.venv/bin/python" ]; then
+  PYTHON_BIN="./.venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   EXISTING_PIDS="$(lsof -ti tcp:7860 2>/dev/null || true)"
   if [ -n "$EXISTING_PIDS" ]; then
@@ -19,4 +25,4 @@ if command -v lsof >/dev/null 2>&1; then
 fi
 
 export BROWSER_TARGET="${BROWSER_TARGET:-chrome}"
-python3 server.py
+"$PYTHON_BIN" server.py

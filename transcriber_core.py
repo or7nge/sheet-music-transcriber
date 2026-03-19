@@ -5,27 +5,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 import os
 import shutil
 import subprocess
-
-import cv2
-from music21 import converter
-import numpy as np
-from pdf2image import convert_from_path
+import time
 
 
 ProgressCallback = Callable[[str, float, str], None]
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 DEFAULT_HOMR_DIR = Path("/Users/andrew/Documents/git/homr")
+HOMR_CHECK_TTL_SECONDS = 15.0
+_homr_check_cache: dict[str, float | bool] = {"checked_at": 0.0, "value": False}
 
 
 @dataclass(slots=True)
 class ProcessingResult:
-    abc_text: str
     concise_notes_text: str
     musicxml_path: Path
     midi_path: Optional[Path]
@@ -46,10 +44,43 @@ def resolve_homr_dir() -> Path:
     return DEFAULT_HOMR_DIR
 
 
-def check_homr_installation() -> bool:
+@lru_cache(maxsize=1)
+def _music21_converter():
+    from music21 import converter
+
+    return converter
+
+
+@lru_cache(maxsize=1)
+def _pdf2image_convert():
+    from pdf2image import convert_from_path
+
+    return convert_from_path
+
+
+@lru_cache(maxsize=1)
+def _cv2_module():
+    import cv2
+
+    return cv2
+
+
+@lru_cache(maxsize=1)
+def _numpy_module():
+    import numpy as np
+
+    return np
+
+
+def check_homr_installation(force_refresh: bool = False) -> bool:
     """Check whether homr is callable from the configured directory."""
+    cache_age = time.time() - float(_homr_check_cache["checked_at"])
+    if not force_refresh and cache_age < HOMR_CHECK_TTL_SECONDS:
+        return bool(_homr_check_cache["value"])
+
     homr_dir = resolve_homr_dir()
     if not homr_dir.exists():
+        _homr_check_cache.update({"checked_at": time.time(), "value": False})
         return False
 
     try:
@@ -60,19 +91,30 @@ def check_homr_installation() -> bool:
             timeout=15,
             cwd=homr_dir,
         )
-        return result.returncode == 0
+        success = result.returncode == 0
+        _homr_check_cache.update({"checked_at": time.time(), "value": success})
+        return success
     except (subprocess.SubprocessError, FileNotFoundError):
+        _homr_check_cache.update({"checked_at": time.time(), "value": False})
         return False
 
 
 def convert_pdf_to_images(pdf_path: str | Path, output_dir: str | Path) -> list[Path]:
-    """Convert each PDF page to JPEG and return output paths."""
+    """Convert the first PDF page to JPEG and return output paths."""
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    convert_from_path = _pdf2image_convert()
 
     try:
-        images = convert_from_path(str(pdf_path), dpi=300)
+        images = convert_from_path(
+            str(pdf_path),
+            dpi=220,
+            first_page=1,
+            last_page=1,
+            fmt="jpeg",
+            thread_count=1,
+        )
     except Exception as exc:
         raise RuntimeError(f"PDF conversion failed: {exc}") from exc
 
@@ -181,6 +223,8 @@ def _is_staff_detection_failure(details: str) -> bool:
 
 def _prepare_retry_image_for_homr(image_path: Path, output_dir: Path) -> Path:
     """Build a contrast-enhanced binary image that improves staff detection."""
+    cv2 = _cv2_module()
+    np = _numpy_module()
     image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise RuntimeError("Uploaded image could not be read for retry preprocessing")
@@ -213,143 +257,12 @@ def _prepare_retry_image_for_homr(image_path: Path, output_dir: Path) -> Path:
     return retry_path
 
 
-def musicxml_to_abc(musicxml_path: str | Path) -> str:
-    """Convert MusicXML to a readable ABC representation."""
-    musicxml_path = Path(musicxml_path)
-
-    try:
-        score = converter.parse(str(musicxml_path))
-
-        abc_lines: list[str] = [
-            "X:1",
-            "T:Transcribed Sheet Music",
-            "M:4/4",
-            "L:1/4",
-            "K:C",
-            "",
-            "% Standard ABC notation (with octaves):",
-            "",
-        ]
-
-        if score.metadata and score.metadata.title:
-            abc_lines[1] = f"T:{score.metadata.title}"
-
-        time_signatures = score.recurse().getElementsByClass("TimeSignature")
-        if time_signatures:
-            time_signature = time_signatures[0]
-            abc_lines[2] = f"M:{time_signature.numerator}/{time_signature.denominator}"
-
-        key_signatures = score.recurse().getElementsByClass("KeySignature")
-        if key_signatures:
-            key_obj = key_signatures[0].asKey()
-            tonic = key_obj.tonic.name
-            abc_lines[4] = f"K:{tonic}m" if key_obj.mode == "minor" else f"K:{tonic}"
-
-        try:
-            chordified = score.chordify()
-        except Exception:
-            return "\n".join(
-                abc_lines
-                + [
-                    "% Could not properly analyze chords",
-                    "% Use MusicXML output for accurate representation",
-                ]
-            )
-
-        for measure in chordified.getElementsByClass("Measure"):
-            measure_items: list[str] = []
-            for element in measure.flatten().notesAndRests:
-                if element.isChord:
-                    pitches = sorted(list(element.pitches), key=lambda pitch: pitch.ps)
-                    chord_notes = [pitch_to_abc(pitch) for pitch in pitches]
-                    duration = duration_to_abc(element.quarterLength)
-                    if len(pitches) > 1:
-                        measure_items.append("[" + "".join(chord_notes) + "]" + duration)
-                    else:
-                        measure_items.append(chord_notes[0] + duration)
-                elif element.isNote:
-                    measure_items.append(
-                        pitch_to_abc(element.pitch) + duration_to_abc(element.quarterLength)
-                    )
-                elif element.isRest:
-                    measure_items.append("z" + duration_to_abc(element.quarterLength))
-
-            if measure_items:
-                abc_lines.append(" ".join(measure_items) + " |")
-
-        abc_lines.append("")
-        abc_lines.append("% Simplified chord/note list (pitch + octave):")
-        simplified_events: list[str] = []
-        for measure in chordified.getElementsByClass("Measure"):
-            for element in measure.flatten().notesAndRests:
-                if element.isChord:
-                    pitches = sorted(list(element.pitches), key=lambda pitch: pitch.ps)
-                    pitch_labels = [pitch_to_note_label(pitch) for pitch in pitches]
-                    if pitch_labels:
-                        simplified_events.append("/".join(pitch_labels))
-                elif element.isNote:
-                    simplified_events.append(pitch_to_note_label(element.pitch))
-
-        if simplified_events:
-            abc_lines.append(" | ".join(simplified_events))
-
-        return "\n".join(abc_lines)
-
-    except Exception as exc:
-        return (
-            "Error converting to ABC: "
-            f"{exc}\n\n"
-            "(ABC conversion is experimental - use MusicXML for best results)"
-        )
-
-
-def pitch_to_abc(pitch, simple_letters: bool = True) -> str:
-    """Convert music21 pitch to ABC notation."""
-    note_name = pitch.step if simple_letters else pitch.name.replace("-", "_").replace("#", "^")
-    octave = pitch.octave
-
-    if octave >= 5:
-        abc_note = note_name.lower() + ("'" * (octave - 5))
-    elif octave == 4:
-        abc_note = note_name.upper()
-    else:
-        abc_note = note_name.upper() + ("," * (4 - octave))
-
-    return abc_note
-
-
 def pitch_to_note_label(pitch) -> str:
     """Convert music21 pitch to readable note name with octave (e.g., G3, Bb4)."""
     base_name = pitch.name.replace("-", "b")
     if pitch.octave is None:
         return base_name
     return f"{base_name}{int(pitch.octave)}"
-
-
-def duration_to_abc(quarter_length: float) -> str:
-    """Convert music21 quarterLength to ABC duration syntax."""
-    if quarter_length == 4:
-        return "4"
-    if quarter_length == 3:
-        return "3"
-    if quarter_length == 2:
-        return "2"
-    if quarter_length == 1.5:
-        return "3/2"
-    if quarter_length == 1:
-        return ""
-    if quarter_length == 0.75:
-        return "3/4"
-    if quarter_length == 0.5:
-        return "/2"
-    if quarter_length == 0.25:
-        return "/4"
-
-    if quarter_length > 1 and quarter_length == int(quarter_length):
-        return str(int(quarter_length))
-    if quarter_length < 1 and (1 / quarter_length) == int(1 / quarter_length):
-        return f"/{int(1 / quarter_length)}"
-    return str(quarter_length)
 
 
 def quarter_length_to_fraction(quarter_length: float) -> str:
@@ -384,50 +297,153 @@ def element_to_concise_token(element) -> str | None:
     return None
 
 
+def stream_to_concise_tokens(stream) -> list[str]:
+    """Convert one ordered note/rest stream into concise tokens."""
+    tokens: list[str] = []
+    for element in stream.flatten().notesAndRests:
+        token = element_to_concise_token(element)
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def measure_to_voice_token_groups(measure) -> list[list[str]]:
+    """
+    Convert one measure into 1..N ordered voice token groups.
+
+    Explicit music21 Voice objects are preserved. If the measure has no Voice
+    wrappers, the measure is treated as a single voice.
+    """
+    voice_groups: list[list[str]] = []
+    voices = list(measure.getElementsByClass("Voice"))
+
+    if voices:
+        for voice in voices:
+            tokens = stream_to_concise_tokens(voice)
+            if tokens:
+                voice_groups.append(tokens)
+        return voice_groups
+
+    tokens = stream_to_concise_tokens(measure)
+    if tokens:
+        voice_groups.append(tokens)
+    return voice_groups
+
+
+def format_key_signature_accidentals(key_signature) -> str:
+    """Format a key signature as an ordered accidental list like F#,C# or Bb,Eb."""
+    sharps = getattr(key_signature, "sharps", None)
+    if not sharps:
+        return ""
+
+    sharp_order = ["F#", "C#", "G#", "D#", "A#", "E#", "B#"]
+    flat_order = ["Bb", "Eb", "Ab", "Db", "Gb", "Cb", "Fb"]
+    if sharps > 0:
+        return ",".join(sharp_order[:sharps])
+    return ",".join(flat_order[: abs(sharps)])
+
+
+def score_to_measure_voice_groups(score) -> list[tuple[str, str, list[list[str]]]]:
+    """Collect measure-aligned voice groups and active key signature in score order."""
+    parts = list(getattr(score, "parts", []))
+    if not parts:
+        measure_groups: list[tuple[str, str, list[list[str]]]] = []
+        active_key_signature = ""
+        for index, measure in enumerate(score.getElementsByClass("Measure"), start=1):
+            key_signatures = list(measure.getElementsByClass("KeySignature"))
+            if key_signatures:
+                active_key_signature = format_key_signature_accidentals(key_signatures[0])
+            voice_groups = measure_to_voice_token_groups(measure)
+            if voice_groups:
+                label = str(measure.number) if measure.number is not None else str(index)
+                measure_groups.append((label, active_key_signature, voice_groups))
+        return measure_groups
+
+    part_measures = [list(part.getElementsByClass("Measure")) for part in parts]
+    total_measures = max((len(measures) for measures in part_measures), default=0)
+    measure_groups: list[tuple[str, str, list[list[str]]]] = []
+    active_key_signature = ""
+
+    for measure_index in range(total_measures):
+        combined_voice_groups: list[list[str]] = []
+        measure_label = str(measure_index + 1)
+        measure_key_signature = ""
+
+        for measures in part_measures:
+            if measure_index >= len(measures):
+                continue
+            measure = measures[measure_index]
+            if measure.number is not None:
+                measure_label = str(measure.number)
+            if not measure_key_signature:
+                key_signatures = list(measure.getElementsByClass("KeySignature"))
+                if key_signatures:
+                    measure_key_signature = format_key_signature_accidentals(key_signatures[0])
+            combined_voice_groups.extend(measure_to_voice_token_groups(measure))
+
+        if measure_key_signature or any(
+            measure_index < len(measures)
+            and list(measures[measure_index].getElementsByClass("KeySignature"))
+            for measures in part_measures
+        ):
+            active_key_signature = measure_key_signature
+
+        if combined_voice_groups:
+            measure_groups.append((measure_label, active_key_signature, combined_voice_groups))
+
+    return measure_groups
+
+
 def musicxml_to_concise_notes(musicxml_path: str | Path) -> str:
     """
-    Build an ordered concise note stream from MusicXML.
-    Format: NOTE_OR_CHORD:DURATION, with measures separated by '|'.
-    Examples: C4:1/4, [C4,E4,G4]:1/2, R:1/8
+    Build a measure-by-measure voice-preserving note encoding from MusicXML.
+
+    Format:
+    - one line per measure
+    - optional `ks=` line before a measure only when the key signature changes
+    - voices separated by ' || '
+    - events inside each voice are space-separated NOTE:DURATION tokens
+
+    Example:
+    ks=F#,C#
+    m1: v1=C5:1/4 D5:1/4 E5:1/4 F#5:1/4 || v2=A3:1/2 B3:1/2
+    m2: v1=G5:1/4 A5:1/4 B5:1/4 C#6:1/4 || v2=...
+    m9: v1=C5:1/4 B4:1/4 A4:1/4 G4:1/4
     """
     musicxml_path = Path(musicxml_path)
+    converter = _music21_converter()
 
     try:
         score = converter.parse(str(musicxml_path))
-        try:
-            ordered_score = score.chordify()
-        except Exception:
-            ordered_score = score
+        measure_voice_groups = score_to_measure_voice_groups(score)
+        if measure_voice_groups:
+            lines: list[str] = []
+            last_emitted_key_signature: str | None = None
+            for measure_label, key_signature, voice_groups in measure_voice_groups:
+                encoded_voices = [
+                    f"v{voice_index}=" + " ".join(tokens)
+                    for voice_index, tokens in enumerate(voice_groups, start=1)
+                ]
+                measure_prefix: list[str] = []
+                if key_signature and key_signature != last_emitted_key_signature:
+                    measure_prefix.append(f"ks={key_signature}")
+                last_emitted_key_signature = key_signature
+                measure_prefix.append(f"m{measure_label}: " + " || ".join(encoded_voices))
+                lines.append("\n".join(measure_prefix))
+            return "\n".join(lines)
 
-        measure_chunks: list[str] = []
-        for measure in ordered_score.getElementsByClass("Measure"):
-            tokens: list[str] = []
-            for element in measure.flatten().notesAndRests:
-                token = element_to_concise_token(element)
-                if token:
-                    tokens.append(token)
-            if tokens:
-                measure_chunks.append(" ".join(tokens))
-
-        if measure_chunks:
-            return " | ".join(measure_chunks)
-
-        # Fallback when score has no measure wrappers.
-        tokens: list[str] = []
-        for element in ordered_score.flatten().notesAndRests:
-            token = element_to_concise_token(element)
-            if token:
-                tokens.append(token)
+        tokens = stream_to_concise_tokens(score)
         if tokens:
             return " ".join(tokens)
 
         return "No note events detected."
     except Exception as exc:
-        return f"Error building concise note output: {exc}"
+        return f"Error building note output: {exc}"
 
 
 def musicxml_to_midi(musicxml_path: str | Path, output_path: str | Path) -> Path:
     """Convert MusicXML to MIDI."""
+    converter = _music21_converter()
     score = converter.parse(str(musicxml_path))
     output = Path(output_path)
     score.write("midi", fp=str(output))
@@ -469,7 +485,7 @@ def process_sheet_music_file(
             raise RuntimeError("No pages were found in the uploaded PDF")
         process_image = pages[0]
         preview_path = process_image
-        log.append(f"Detected {len(pages)} PDF page(s); processing page 1")
+        log.append("Converted PDF page 1 to an image for recognition")
         emit("preparing", 0.3, "Preparing input file")
     else:
         process_image = input_path
@@ -481,15 +497,12 @@ def process_sheet_music_file(
     musicxml_path = process_with_homr(process_image, output_dir)
     emit("recognizing", 0.62, "Running optical music recognition")
 
-    emit("converting_abc", 0.68, "Converting MusicXML to ABC")
-    abc_text = musicxml_to_abc(musicxml_path)
-    emit("converting_abc", 0.78, "Converting MusicXML to ABC")
-    emit("converting_notes", 0.8, "Generating concise note sequence")
+    emit("converting_notes", 0.8, "Generating note sequence")
     concise_notes_text = musicxml_to_concise_notes(musicxml_path)
-    emit("converting_notes", 0.82, "Generating concise note sequence")
+    emit("converting_notes", 0.82, "Generating note sequence")
 
     emit("converting_midi", 0.83, "Converting MusicXML to MIDI")
-    midi_path: Optional[Path] = output_dir / "score.mid"
+    midi_path: Optional[Path] = output_dir / "output.mid"
     try:
         musicxml_to_midi(musicxml_path, midi_path)
     except Exception as exc:
@@ -500,7 +513,6 @@ def process_sheet_music_file(
     emit("packaging", 0.94, "Packaging output files")
 
     return ProcessingResult(
-        abc_text=abc_text,
         concise_notes_text=concise_notes_text,
         musicxml_path=musicxml_path,
         midi_path=midi_path,
