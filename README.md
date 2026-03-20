@@ -9,8 +9,8 @@ It runs entirely on your machine — no cloud, no accounts.
 Input image and detected structure:
 
 <p float="left">
-  <img src="sample.png" width="48%" />
-  <img src="sample_teaser.png" width="48%" />
+  <img src="docs/assets/sample.png" width="48%" />
+  <img src="docs/assets/sample_teaser.png" width="48%" />
 </p>
 
 ## How it works
@@ -30,7 +30,7 @@ poetry install --only main
 poetry run homr --init
 ```
 
-If `homr` is not cloned to `/Users/<you>/Documents/git/homr`, set the path:
+By default the app looks for a sibling `../homr` checkout. If yours lives elsewhere, set the path:
 
 ```bash
 export HOMR_DIR="/path/to/homr"
@@ -59,6 +59,12 @@ apt-get install poppler-utils
 ```
 
 This starts the server and opens the app at `http://127.0.0.1:7860`.
+
+## Testing
+
+```bash
+./.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Notes
 

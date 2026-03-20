@@ -38,6 +38,7 @@ temp_*/
 # IDE
 .vscode/
 .idea/
+.codex/
 *.swp
 *.swo
 *~

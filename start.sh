@@ -4,7 +4,7 @@
 echo "Starting Sheet Music Transcriber Studio"
 echo "http://127.0.0.1:7860"
 echo ""
-echo "Set HOMR_DIR if homr lives outside /Users/andrew/Documents/git/homr"
+echo "Set HOMR_DIR if homr lives outside ../homr"
 echo "Set BROWSER_TARGET=chrome|safari|default (default: chrome)"
 echo "Press Ctrl+C to stop the server"
 echo ""

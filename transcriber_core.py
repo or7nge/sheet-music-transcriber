@@ -17,7 +17,8 @@ import time
 ProgressCallback = Callable[[str, float, str], None]
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
-DEFAULT_HOMR_DIR = Path("/Users/andrew/Documents/git/homr")
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_HOMR_DIR_NAME = "homr"
 HOMR_CHECK_TTL_SECONDS = 15.0
 _homr_check_cache: dict[str, float | bool] = {"checked_at": 0.0, "value": False}
 
@@ -35,13 +36,19 @@ def resolve_homr_dir() -> Path:
     """Resolve homr working directory with env override."""
     env_override = os.environ.get("HOMR_DIR")
     if env_override:
-        return Path(env_override).expanduser()
+        return Path(env_override).expanduser().resolve()
 
-    sibling_candidate = Path.cwd().parent / "homr"
-    if sibling_candidate.exists():
-        return sibling_candidate
+    candidates = (
+        BASE_DIR.parent / DEFAULT_HOMR_DIR_NAME,
+        BASE_DIR / DEFAULT_HOMR_DIR_NAME,
+        Path.cwd().parent / DEFAULT_HOMR_DIR_NAME,
+        Path.cwd() / DEFAULT_HOMR_DIR_NAME,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
 
-    return DEFAULT_HOMR_DIR
+    return (BASE_DIR.parent / DEFAULT_HOMR_DIR_NAME).resolve()
 
 
 @lru_cache(maxsize=1)
