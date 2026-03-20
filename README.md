@@ -1,31 +1,27 @@
-# Sheet Music Transcriber Studio
+# Sheet Music Transcriber
 
-Single-app browser workflow for sheet music transcription.
+A local web app that converts sheet music images into playable formats. Upload a photo or scan of sheet music and get back MIDI, MusicXML, and a plain text note list.
 
-Upload a JPG, PNG, or PDF and export:
-- `Notes`
-- `MIDI`
-- `MusicXML`
+It runs entirely on your machine — no cloud, no accounts.
 
-## Current Architecture
+## Demo
 
-- `server.py`: FastAPI server, job orchestration, static file serving
-- `transcriber_core.py`: shared transcription pipeline
-- `frontend/`: lightweight custom HTML/CSS/JS client
+Input image and detected structure:
 
-The old Gradio variants have been removed. There is now one supported app implementation.
+<p float="left">
+  <img src="sample.png" width="48%" />
+  <img src="sample_teaser.png" width="48%" />
+</p>
 
-## Prerequisites
+## How it works
 
-- Python `3.10+`
-- Poetry for your local `homr` install
-- Poppler for PDF conversion
-  - macOS: `brew install poppler`
-  - Linux: `apt-get install poppler-utils`
+The app uses [homr](https://github.com/liebharc/homr), an open-source optical music recognition model, to detect and transcribe notes from sheet music images. A FastAPI backend handles job processing and a lightweight browser frontend handles the UI.
+
+Supported input formats: JPG, PNG, PDF (first page only).
 
 ## Setup
 
-### 1. Install `homr`
+**1. Install homr**
 
 ```bash
 git clone https://github.com/liebharc/homr.git
@@ -34,41 +30,36 @@ poetry install --only main
 poetry run homr --init
 ```
 
-If `homr` is not at `/Users/andrew/Documents/git/homr`, set:
+If `homr` is not cloned to `/Users/<you>/Documents/git/homr`, set the path:
 
 ```bash
 export HOMR_DIR="/path/to/homr"
 ```
 
-### 2. Install app dependencies
+**2. Install dependencies**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Start Options
+You'll also need Poppler for PDF support:
 
-- `./start.sh`: canonical launcher for the web app on `http://127.0.0.1:7860`
-- `./start_minimal.sh`: compatibility alias; now just forwards to `./start.sh`
-- `./start_premium.sh`: compatibility alias; now just forwards to `./start.sh`
+```bash
+# macOS
+brew install poppler
 
-Environment variables:
-- `HOMR_DIR`: override the `homr` repo location
-- `BROWSER_TARGET=chrome|safari|default`: choose browser auto-open target
-- `AUTO_OPEN_BROWSER=0`: disable automatic browser launch
-- `HOST` / `PORT`: override bind address and port
+# Linux
+apt-get install poppler-utils
+```
 
-## API
+## Running
 
-- `GET /api/health`
-- `POST /api/jobs`
-- `GET /api/jobs/{job_id}`
-- `GET /api/jobs/{job_id}/files/midi`
-- `GET /api/jobs/{job_id}/files/musicxml`
-- `GET /api/jobs/{job_id}/files/preview`
+```bash
+./start.sh
+```
+
+This starts the server and opens the app at `http://127.0.0.1:7860`.
 
 ## Notes
 
-- Recognition quality is best with high-resolution printed sheet music.
-- PDFs currently rasterize and process only page 1 for speed.
-- Job artifacts are stored temporarily under your system temp directory.
+Recognition works best on clean, high-resolution printed sheet music. Handwritten or low-quality scans may produce poor results.
