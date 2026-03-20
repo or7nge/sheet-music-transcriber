@@ -307,6 +307,148 @@ def stream_to_concise_tokens(stream) -> list[str]:
     return tokens
 
 
+@dataclass(slots=True)
+class VoiceEvent:
+    token: str
+    offset: Fraction
+    duration: Fraction
+    is_rest: bool
+
+
+def _fraction_to_quarter_length(value: Fraction) -> float:
+    return float(value)
+
+
+def _duration_token_from_quarter_length(value: Fraction) -> str:
+    return quarter_length_to_fraction(_fraction_to_quarter_length(value))
+
+
+def _append_rest_event(events: list[VoiceEvent], offset: Fraction, duration: Fraction) -> None:
+    if duration <= 0:
+        return
+
+    if events and events[-1].is_rest and events[-1].offset + events[-1].duration == offset:
+        merged = events[-1]
+        merged.duration += duration
+        merged.token = f"R:{_duration_token_from_quarter_length(merged.duration)}"
+        return
+
+    events.append(
+        VoiceEvent(
+            token=f"R:{_duration_token_from_quarter_length(duration)}",
+            offset=offset,
+            duration=duration,
+            is_rest=True,
+        )
+    )
+
+
+def stream_to_voice_events(stream) -> list[VoiceEvent]:
+    """
+    Convert a stream into ordered events, filling offset gaps with rests.
+
+    music21 can leave gaps implicit inside voices; representing them explicitly keeps
+    duration totals comparable across voices without depending on the written meter.
+    """
+    events: list[VoiceEvent] = []
+    current_offset = Fraction(0)
+
+    for element in stream.flatten().notesAndRests:
+        offset = Fraction(element.offset).limit_denominator(192)
+        duration = Fraction(float(element.quarterLength)).limit_denominator(192)
+        if duration <= 0:
+            continue
+
+        if offset > current_offset:
+            _append_rest_event(events, current_offset, offset - current_offset)
+
+        token = element_to_concise_token(element)
+        if token is None:
+            current_offset = max(current_offset, offset + duration)
+            continue
+
+        events.append(
+            VoiceEvent(
+                token=token,
+                offset=offset,
+                duration=duration,
+                is_rest=bool(element.isRest),
+            )
+        )
+        current_offset = max(current_offset, offset + duration)
+
+    return events
+
+
+def _voice_effective_end(events: list[VoiceEvent]) -> Fraction:
+    """Return the end of the last non-rest event, or total rest length if the voice is silent."""
+    for event in reversed(events):
+        if not event.is_rest:
+            return event.offset + event.duration
+    if events:
+        last_event = events[-1]
+        return last_event.offset + last_event.duration
+    return Fraction(0)
+
+
+def _normalize_voice_events(events: list[VoiceEvent], target_duration: Fraction) -> list[str]:
+    """Trim/pad one voice so all voices in a measure end at the same effective duration."""
+    normalized: list[VoiceEvent] = []
+
+    for event in events:
+        if event.offset >= target_duration:
+            break
+        end = min(event.offset + event.duration, target_duration)
+        clipped_duration = end - event.offset
+        if clipped_duration <= 0:
+            continue
+
+        if event.is_rest:
+            _append_rest_event(normalized, event.offset, clipped_duration)
+            continue
+
+        token_body = event.token.split(":", 1)[0]
+        normalized.append(
+            VoiceEvent(
+                token=f"{token_body}:{_duration_token_from_quarter_length(clipped_duration)}",
+                offset=event.offset,
+                duration=clipped_duration,
+                is_rest=False,
+            )
+        )
+
+    current_duration = _voice_effective_end(normalized)
+    if current_duration < target_duration:
+        _append_rest_event(normalized, current_duration, target_duration - current_duration)
+
+    return [event.token for event in normalized if event.duration > 0]
+
+
+def normalize_measure_voice_token_groups(measure) -> list[list[str]]:
+    """
+    Build measure voice groups with equalized durations across voices.
+
+    The target duration is the latest non-rest endpoint among voices in the measure,
+    so output does not depend on the measure's written time signature.
+    """
+    voices = list(measure.getElementsByClass("Voice"))
+    if not voices:
+        tokens = stream_to_concise_tokens(measure)
+        return [tokens] if tokens else []
+
+    voice_events = [stream_to_voice_events(voice) for voice in voices]
+    voice_events = [events for events in voice_events if events]
+    if not voice_events:
+        return []
+
+    target_duration = max((_voice_effective_end(events) for events in voice_events), default=Fraction(0))
+    normalized_groups = [
+        _normalize_voice_events(events, target_duration)
+        for events in voice_events
+    ]
+    return [group for group in normalized_groups if group]
+
+
 def measure_to_voice_token_groups(measure) -> list[list[str]]:
     """
     Convert one measure into 1..N ordered voice token groups.
@@ -314,20 +456,7 @@ def measure_to_voice_token_groups(measure) -> list[list[str]]:
     Explicit music21 Voice objects are preserved. If the measure has no Voice
     wrappers, the measure is treated as a single voice.
     """
-    voice_groups: list[list[str]] = []
-    voices = list(measure.getElementsByClass("Voice"))
-
-    if voices:
-        for voice in voices:
-            tokens = stream_to_concise_tokens(voice)
-            if tokens:
-                voice_groups.append(tokens)
-        return voice_groups
-
-    tokens = stream_to_concise_tokens(measure)
-    if tokens:
-        voice_groups.append(tokens)
-    return voice_groups
+    return normalize_measure_voice_token_groups(measure)
 
 
 def format_key_signature_accidentals(key_signature) -> str:
