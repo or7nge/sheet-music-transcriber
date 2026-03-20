@@ -4,18 +4,18 @@ A local web app that converts sheet music images into playable formats. Upload a
 
 It runs entirely on your machine — no cloud, no accounts.
 
-## Demo
-
-Input image and detected structure:
+## Screenshots
 
 <p float="left">
-  <img src="docs/assets/sample.png" width="48%" />
-  <img src="docs/assets/sample_teaser.png" width="48%" />
+  <img src="docs/screenshots/upload.png" width="40%" />
+  <img src="docs/screenshots/result.png" width="57%" />
 </p>
 
 ## How it works
 
-The app uses [homr](https://github.com/liebharc/homr), an open-source optical music recognition model, to detect and transcribe notes from sheet music images. A FastAPI backend handles job processing and a lightweight browser frontend handles the UI.
+When you upload a file, the app calls [homr](https://github.com/liebharc/homr) as a subprocess (`poetry run homr <image>`). homr runs an optical music recognition pipeline — staff line detection followed by neural network-based notehead and symbol classification — and outputs a MusicXML file. The app then uses [music21](https://web.mit.edu/music21/) to convert that MusicXML into MIDI and a compact plain-text note encoding.
+
+The backend is a FastAPI server that manages job state and file downloads. The frontend is plain HTML/CSS/JS.
 
 Supported input formats: JPG, PNG, PDF (first page only).
 
@@ -59,12 +59,6 @@ apt-get install poppler-utils
 ```
 
 This starts the server and opens the app at `http://127.0.0.1:7860`.
-
-## Testing
-
-```bash
-./.venv/bin/python -m unittest discover -s tests -v
-```
 
 ## Notes
 
